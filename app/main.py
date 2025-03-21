@@ -5,7 +5,29 @@ from .routers import auth, targets, results, agent_status, analytics
 app = FastAPI(
     title="Boingo API Tester",
     description="A FastAPI application for testing Boingo API endpoints",
-    version="1.0.0"
+    version="1.0.0",
+    openapi_tags=[
+        {
+            "name": "Authentication API",
+            "description": "Operations related to authentication with the Boingo API"
+        },
+        {
+            "name": "Scraping Target API", 
+            "description": "Operations for creating and managing scraping targets"
+        },
+        {
+            "name": "Scraping Result API",
+            "description": "Operations for managing scraped results data"
+        },
+        {
+            "name": "Agent Status API",
+            "description": "Operations for monitoring and managing agent statuses"
+        },
+        {
+            "name": "Scraping Analytics API",
+            "description": "Operations for retrieving scraping analytics and metrics"
+        }
+    ]
 )
 
 # Configure CORS

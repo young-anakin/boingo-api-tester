@@ -12,7 +12,7 @@ from .auth import security
 
 router = APIRouter(
     prefix="/scraping-target",
-    tags=["Scraping Target"],
+    tags=["Scraping Target API"],
     responses={404: {"description": "Not found"}},
 )
 

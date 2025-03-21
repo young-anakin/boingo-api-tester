@@ -8,7 +8,7 @@ from ..core.config import BOINGO_API_URL, BOINGO_EMAIL, BOINGO_PASSWORD
 
 router = APIRouter(
     prefix="/auth",
-    tags=["Authentication"],
+    tags=["Authentication API"],
     responses={401: {"description": "Unauthorized"}},
 )
 

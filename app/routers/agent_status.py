@@ -10,7 +10,7 @@ from .auth import security
 
 router = APIRouter(
     prefix="/agent-status",
-    tags=["Agent Status"],
+    tags=["Agent Status API"],
     responses={404: {"description": "Not found"}},
 )
 

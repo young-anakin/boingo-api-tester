@@ -6,7 +6,7 @@ from .auth import security
 
 router = APIRouter(
     prefix="/scraping-analytics",
-    tags=["Scraping Analytics"],
+    tags=["Scraping Analytics API"],
     responses={404: {"description": "Not found"}},
 )
 
