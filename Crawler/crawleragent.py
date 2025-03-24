@@ -2,6 +2,7 @@ import asyncio
 import os
 import re
 import json
+import logging
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 from crawl4ai import AsyncWebCrawler
@@ -21,13 +22,14 @@ import time
 load_dotenv()
 
 # Set up OpenAI client
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
-    raise ValueError("OPENAI_API_KEY environment variable is not set")
-client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # Initialize tokenizer
 tokenizer = tiktoken.encoding_for_model("gpt-3.5-turbo")
+
+# Configure logging (consistent with property_pipeline.py)
+logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # Set ProactorEventLoop for Windows compatibility with Playwright
 if sys.platform == "win32":
@@ -72,10 +74,10 @@ class PropertyListing(BaseModel):
                 return v
         price_str = values.get('price', '') if isinstance(values.get('price'), str) else ''
         if isinstance(price_str, str):
-            if '$' in price_str and 'MXN' not in price_str:
-                return 'USD'
-            elif 'MXN' in price_str or '$' in price_str:
+            if '$' in price_str and 'MXN' in price_str:
                 return 'MXN'
+            elif '$' in price_str:
+                return 'USD'
         return 'MXN'
 
     @field_validator('listing_type')
@@ -126,7 +128,7 @@ class PropertyListing(BaseModel):
         return None
 
 class Address(BaseModel):
-    country: str = "Mexico"  # Default to Mexico since it's a Mexican real estate site
+    country: str = "Mexico"
     region: Optional[str] = None
     city: Optional[str] = None
     district: Optional[str] = None
@@ -139,7 +141,7 @@ class Listing(BaseModel):
     description: Optional[str] = None
     price: Optional[str] = None
     currency: Optional[str] = None
-    status: str = "Available"  # Default status
+    status: str = "Available"
     listing_type: Optional[str] = None
     category: Optional[str] = None
 
@@ -161,8 +163,6 @@ class PropertyData(BaseModel):
 
 def transform_to_new_format(property_listing: PropertyListing) -> PropertyData:
     """Transform the original property listing to the new format"""
-    
-    # Extract address components
     address_parts = property_listing.address.split(',') if property_listing.address else []
     address = Address(
         country="Mexico",
@@ -171,7 +171,6 @@ def transform_to_new_format(property_listing: PropertyListing) -> PropertyData:
         district=address_parts[0].strip() if address_parts else None
     )
     
-    # Create listing object
     listing = Listing(
         description=property_listing.description,
         price=str(property_listing.price) if property_listing.price else None,
@@ -180,10 +179,7 @@ def transform_to_new_format(property_listing: PropertyListing) -> PropertyData:
         category=property_listing.property_type
     )
     
-    # Create features list with detailed property information
     features = []
-    
-    # Basic property features
     if property_listing.bedrooms:
         features.append(Feature(feature="Bedrooms", value=str(property_listing.bedrooms)))
     if property_listing.bathrooms:
@@ -192,34 +188,26 @@ def transform_to_new_format(property_listing: PropertyListing) -> PropertyData:
         features.append(Feature(feature="Square Footage", value=str(property_listing.square_footage)))
     if property_listing.year_built:
         features.append(Feature(feature="Year Built", value=str(property_listing.year_built)))
-    
-    # Property type and listing details
     if property_listing.property_type:
         features.append(Feature(feature="Property Type", value=property_listing.property_type))
     if property_listing.listing_type:
         features.append(Feature(feature="Listing Type", value=property_listing.listing_type))
-    
-    # Additional information from additional_info
     for key, value in property_listing.additional_info.items():
         if value is not None:
             features.append(Feature(feature=key.title(), value=str(value)))
-    
-    # Add amenities as features
     for amenity in property_listing.amenities:
         if amenity:
             features.append(Feature(feature=amenity.title(), value="true"))
     
-    # Create files list
     files = []
     if property_listing.image_link:
         files.append(property_listing.image_link)
     
-    # Create user object (empty as we don't have this data)
     user = User()
     
     return PropertyData(
         address=address,
-        property=PropertyLocation(),  # Empty as we don't have lat/lng data
+        property=PropertyLocation(),
         listing=listing,
         features=features,
         files=files,
@@ -227,17 +215,18 @@ def transform_to_new_format(property_listing: PropertyListing) -> PropertyData:
     )
 
 def save_to_json(listings: List[PropertyListing], url: str):
-    """Save listings to JSON file in the new format"""
-    url_hash = re.sub(r'[^\w\-_.]', '_', url)
-    output_file = f"raw_property_listings_{url_hash}.json"
+    """Save listings to JSON file in the new format with output/ prefix"""
+    output_dir = "output"
+    os.makedirs(output_dir, exist_ok=True)
+    safe_filename = url_hash(url)
+    output_file = os.path.join(output_dir, f"raw_property_listings_{safe_filename}.json")
     
-    # Transform listings to new format
     transformed_listings = [transform_to_new_format(listing) for listing in listings]
     
-    # Save the array directly without any wrapper
     with open(output_file, "w", encoding="utf-8") as f:
         json.dump([listing.dict() for listing in transformed_listings], f, indent=2)
-    print(f"Saved transformed data to {output_file}")
+    
+    logger.warning(f"Saved transformed data to {output_file}")
 
 def clean_text(text):
     text = re.sub(r'<[^>]+>', '', text)
@@ -283,11 +272,9 @@ def create_smart_chunks(text, max_tokens=500, overlap_tokens=50):
 async def extract_housing_info(text, max_chunks=None, delay_seconds=1.0, max_total_tokens=None):
     chunks = create_smart_chunks(text)
     
-    # Limit number of chunks if specified
     if max_chunks is not None and max_chunks > 0:
         chunks = chunks[:max_chunks]
     
-    # Apply max_total_tokens limit if specified
     if max_total_tokens is not None and max_total_tokens > 0:
         total_tokens = 0
         limited_chunks = []
@@ -301,18 +288,16 @@ async def extract_housing_info(text, max_chunks=None, delay_seconds=1.0, max_tot
         chunks = limited_chunks
         
     all_housing_info = []
-    print(f"Processing {len(chunks)} chunks")
+    logger.info(f"Processing {len(chunks)} chunks")
 
     for i, chunk in enumerate(chunks):
         try:
-            # Add delay between requests to avoid rate limiting
             if i > 0 and delay_seconds > 0:
-                print(f"Waiting {delay_seconds} seconds before processing next chunk...")
+                logger.info(f"Waiting {delay_seconds} seconds before processing next chunk...")
                 await asyncio.sleep(delay_seconds)
             
-            # Calculate approximate token count for logging/monitoring
             chunk_tokens = len(tokenizer.encode(chunk))
-            print(f"Chunk {i+1} size: ~{chunk_tokens} tokens")
+            logger.info(f"Chunk {i+1} size: ~{chunk_tokens} tokens")
                 
             response = await client.chat.completions.create(
                 model="gpt-3.5-turbo",
@@ -360,9 +345,9 @@ async def extract_housing_info(text, max_chunks=None, delay_seconds=1.0, max_tot
                         listing_data['source'] = 'Casas y Terrenos'
                     validated_listing = PropertyListing(**listing_data)
                     all_housing_info.append(validated_listing)
-                    print(f"Validated listing: {validated_listing.address or 'Unknown address'}")
+                    logger.info(f"Validated listing: {validated_listing.address or 'Unknown address'}")
         except Exception as e:
-            print(f"Error processing chunk {i+1}: {str(e)}")
+            logger.error(f"Error processing chunk {i+1}: {str(e)}")
     return all_housing_info
 
 async def scrape_with_playwright_crawl4ai(url, max_depth, max_pages):
@@ -380,13 +365,12 @@ async def scrape_with_playwright_crawl4ai(url, max_depth, max_pages):
             url=url,
             config=run_config
         )
-        return results  # Returns a list of CrawlResult objects
+        return results
 
 async def process_scraping(url, max_depth, max_pages, max_chunks=None, delay_seconds=1.0, max_total_tokens=None):
-    print(f"Scraping {url} with max_depth={max_depth}, max_pages={max_pages}...")
+    logger.info(f"Scraping {url} with max_depth={max_depth}, max_pages={max_pages}...")
     results = await scrape_with_playwright_crawl4ai(url, max_depth, max_pages)
     
-    # Combine content from all successful results
     combined_content = ""
     success = False
     for result in results:
@@ -395,17 +379,17 @@ async def process_scraping(url, max_depth, max_pages, max_chunks=None, delay_sec
             success = True
     
     if not success:
-        print(f"Failed to scrape {url}")
+        logger.error(f"Failed to scrape {url}")
         return 0
     
-    print("Scraped content successfully")
+    logger.info("Scraped content successfully")
     housing_info = await extract_housing_info(
         combined_content, 
         max_chunks=max_chunks, 
         delay_seconds=delay_seconds,
         max_total_tokens=max_total_tokens
     )
-    print(f"Extracted {len(housing_info)} listings")
+    logger.warning(f"Extracted {len(housing_info)} listings")
     
     save_to_json(housing_info, url)
     return len(housing_info)
@@ -420,170 +404,16 @@ def process_scraping_sync(url, max_depth, max_pages, max_chunks=None, delay_seco
     return result
 
 def url_hash(url):
+    """Create a safe filename from a URL (consistent with property_pipeline.py)"""
     return re.sub(r'[^a-zA-Z0-9]', '_', url)[:50]
-
-def run_gui():
-    from property_pipeline import queue_tasks
-
-    root = tk.Tk()
-    root.title("Property Scraper")
-    root.geometry("800x750")
-    root.configure(bg="#2E2E2E")
-    root.resizable(False, False)
-
-    style = ttk.Style()
-    style.theme_use("clam")
-    style.configure("TLabel", background="#2E2E2E", foreground="#FFFFFF", font=("Helvetica", 12))
-    style.configure("TButton", font=("Helvetica", 12, "bold"), padding=10, background="#4CAF50", foreground="#FFFFFF")
-    style.map("TButton", background=[("active", "#45A049")])
-    style.configure("TEntry", fieldbackground="#424242", foreground="#FFFFFF", font=("Helvetica", 11))
-    style.configure("TCheckbutton", background="#2E2E2E", foreground="#FFFFFF", font=("Helvetica", 11))
-    style.map("TCheckbutton", background=[("active", "#2E2E2E")])
-
-    ttk.Label(root, text="Property Web Scraper", font=("Helvetica", 18, "bold"), foreground="#4CAF50").pack(pady=15)
-
-    frame = ttk.Frame(root, padding="20")
-    frame.pack(fill="both", expand=True)
-
-    # URL Input
-    ttk.Label(frame, text="Websites to Scrape (one per line):").grid(row=0, column=0, padx=10, pady=5, sticky="w")
-    url_text = tk.Text(frame, height=5, width=60, bg="#424242", fg="#FFFFFF", insertbackground="white")
-    url_text.grid(row=1, column=0, columnspan=2, padx=10, pady=5)
-    url_text.insert("1.0", "https://www.casasyterrenos.com/jalisco/Puerto%20Vallarta/casas/venta?desde=0&hasta=5000000")
-
-    # Crawler Configuration
-    crawler_frame = ttk.LabelFrame(frame, text="Crawler Settings", padding=10)
-    crawler_frame.grid(row=2, column=0, columnspan=2, padx=10, pady=10, sticky="we")
-    
-    ttk.Label(crawler_frame, text="Max Depth:").grid(row=0, column=0, padx=10, pady=5, sticky="e")
-    depth_entry = ttk.Entry(crawler_frame, width=10)
-    depth_entry.grid(row=0, column=1, padx=10, pady=5, sticky="w")
-    depth_entry.insert(0, "2")
-
-    ttk.Label(crawler_frame, text="Max Pages:").grid(row=0, column=2, padx=10, pady=5, sticky="e")
-    pages_entry = ttk.Entry(crawler_frame, width=10)
-    pages_entry.grid(row=0, column=3, padx=10, pady=5, sticky="w")
-    pages_entry.insert(0, "5")
-    
-    # API Rate Limiting Configuration
-    api_frame = ttk.LabelFrame(frame, text="API Rate Limiting", padding=10)
-    api_frame.grid(row=3, column=0, columnspan=2, padx=10, pady=10, sticky="we")
-    
-    ttk.Label(api_frame, text="Max Chunks:").grid(row=0, column=0, padx=10, pady=5, sticky="e")
-    chunks_entry = ttk.Entry(api_frame, width=10)
-    chunks_entry.grid(row=0, column=1, padx=10, pady=5, sticky="w")
-    chunks_entry.insert(0, "3")
-    
-    ttk.Label(api_frame, text="Max Total Tokens:").grid(row=0, column=2, padx=10, pady=5, sticky="e")
-    tokens_entry = ttk.Entry(api_frame, width=10)
-    tokens_entry.grid(row=0, column=3, padx=10, pady=5, sticky="w")
-    tokens_entry.insert(0, "10000")
-    
-    ttk.Label(api_frame, text="Scraper Delay (seconds):").grid(row=1, column=0, padx=10, pady=5, sticky="e")
-    delay_entry = ttk.Entry(api_frame, width=10)
-    delay_entry.grid(row=1, column=1, padx=10, pady=5, sticky="w")
-    delay_entry.insert(0, "2.0")
-    
-    ttk.Label(api_frame, text="Cleaner Delay (seconds):").grid(row=1, column=2, padx=10, pady=5, sticky="e")
-    cleaner_delay_entry = ttk.Entry(api_frame, width=10)
-    cleaner_delay_entry.grid(row=1, column=3, padx=10, pady=5, sticky="w")
-    cleaner_delay_entry.insert(0, "1.0")
-    
-    # API Usage Warning
-    warning_frame = ttk.LabelFrame(frame, text="API Usage Warning", padding=10)
-    warning_frame.grid(row=4, column=0, columnspan=2, padx=10, pady=10, sticky="we")
-    
-    warning_text = (
-        "Note: Each chunk consumes approximately 500-1000 tokens.\n"
-        "Smaller chunks and longer delays help avoid API rate limits.\n"
-        "Recommended: max 3-5 chunks, 2+ second delays between requests."
-    )
-    warning_label = ttk.Label(warning_frame, text=warning_text, foreground="#FFA500")
-    warning_label.grid(row=0, column=0, padx=10, pady=5, sticky="w")
-    
-    # Advanced Options
-    advanced_frame = ttk.LabelFrame(frame, text="Advanced Options", padding=10)
-    advanced_frame.grid(row=5, column=0, columnspan=2, padx=10, pady=10, sticky="we")
-    
-    use_sync_var = tk.BooleanVar(value=True)
-    sync_checkbox = ttk.Checkbutton(
-        advanced_frame, 
-        text="Use fully synchronous mode (no asyncio)", 
-        variable=use_sync_var
-    )
-    sync_checkbox.grid(row=0, column=0, padx=10, pady=5, sticky="w")
-
-    # Status and Submit
-    status_label = ttk.Label(frame, text="Ready to scrape", foreground="#FFFFFF", font=("Helvetica", 11, "italic"))
-    status_label.grid(row=6, column=0, columnspan=2, pady=10)
-
-    submit_button = ttk.Button(frame, text="Start Scraping", command=lambda: on_submit())
-    submit_button.grid(row=7, column=0, columnspan=2, pady=20)
-
-    def on_submit():
-        urls = [url.strip() for url in url_text.get("1.0", tk.END).splitlines() if url.strip()]
-        try:
-            max_depth = int(depth_entry.get().strip())
-            max_pages = int(pages_entry.get().strip())
-            max_chunks_val = int(chunks_entry.get().strip())
-            max_tokens = int(tokens_entry.get().strip())
-            delay_seconds = float(delay_entry.get().strip())
-            cleaner_delay = float(cleaner_delay_entry.get().strip())
-            use_sync = use_sync_var.get()
-            
-            # Validate inputs
-            if not urls or max_depth < 0 or max_pages < 1 or delay_seconds < 0 or cleaner_delay < 0:
-                raise ValueError
-            
-            if max_chunks_val < 1:
-                messagebox.showwarning("Warning", "Setting max chunks to at least 1 to ensure some results are processed.")
-                max_chunks_val = 1
-                
-            if max_tokens < 1000:
-                messagebox.showwarning("Warning", "Setting max tokens to at least 1000 to ensure one chunk can be processed.")
-                max_tokens = 1000
-                
-        except ValueError:
-            messagebox.showerror("Input Error", "Enter valid URLs, non-negative depth and delays, and pages >= 1.")
-            return
-        
-        # Set environment variable for synchronous mode
-        if use_sync:
-            os.environ["USE_SYNC"] = "true"
-            status_label.config(text=f"Running in synchronous mode. Queuing {len(urls)} websites...", foreground="#FFA500")
-        else:
-            os.environ["USE_SYNC"] = "false"
-            status_label.config(text=f"Queuing {len(urls)} websites...", foreground="#FFA500")
-            
-        submit_button.config(state="disabled")
-        
-        def queue_and_update():
-            queue_tasks(
-                urls, 
-                max_depth, 
-                max_pages, 
-                max_chunks_val, 
-                delay_seconds, 
-                cleaner_delay,
-                max_tokens
-            )
-            root.after(0, lambda: status_label.config(text=f"Queued {len(urls)} websites!", foreground="green"))
-            root.after(0, lambda: submit_button.config(state="normal"))
-
-        thread = threading.Thread(target=queue_and_update)
-        thread.start()
-
-    root.mainloop()
 
 def extract_housing_info_sync(text, max_chunks=None, delay_seconds=1.0, max_total_tokens=None):
     """Synchronous version of extract_housing_info"""
     chunks = create_smart_chunks(text)
     
-    # Limit number of chunks if specified
     if max_chunks is not None and max_chunks > 0:
         chunks = chunks[:max_chunks]
     
-    # Apply max_total_tokens limit if specified
     if max_total_tokens is not None and max_total_tokens > 0:
         total_tokens = 0
         limited_chunks = []
@@ -597,21 +427,18 @@ def extract_housing_info_sync(text, max_chunks=None, delay_seconds=1.0, max_tota
         chunks = limited_chunks
         
     all_housing_info = []
-    print(f"Processing {len(chunks)} chunks")
+    logger.info(f"Processing {len(chunks)} chunks")
 
-    # Use synchronous OpenAI client
-    client = OpenAI(api_key=OPENAI_API_KEY)
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
     for i, chunk in enumerate(chunks):
         try:
-            # Add delay between requests to avoid rate limiting
             if i > 0 and delay_seconds > 0:
-                print(f"Waiting {delay_seconds} seconds before processing next chunk...")
+                logger.info(f"Waiting {delay_seconds} seconds before processing next chunk...")
                 time.sleep(delay_seconds)
             
-            # Calculate approximate token count for logging/monitoring
             chunk_tokens = len(tokenizer.encode(chunk))
-            print(f"Chunk {i+1} size: ~{chunk_tokens} tokens")
+            logger.info(f"Chunk {i+1} size: ~{chunk_tokens} tokens")
                 
             response = client.chat.completions.create(
                 model="gpt-3.5-turbo",
@@ -659,9 +486,9 @@ def extract_housing_info_sync(text, max_chunks=None, delay_seconds=1.0, max_tota
                         listing_data['source'] = 'Casas y Terrenos'
                     validated_listing = PropertyListing(**listing_data)
                     all_housing_info.append(validated_listing)
-                    print(f"Validated listing: {validated_listing.address or 'Unknown address'}")
+                    logger.info(f"Validated listing: {validated_listing.address or 'Unknown address'}")
         except Exception as e:
-            print(f"Error processing chunk {i+1}: {str(e)}")
+            logger.error(f"Error processing chunk {i+1}: {str(e)}")
     return all_housing_info
 
 def scrape_with_playwright_crawl4ai_sync(url, max_depth, max_pages):
@@ -689,10 +516,9 @@ def scrape_with_playwright_crawl4ai_sync(url, max_depth, max_pages):
 
 def process_scraping_fully_sync(url, max_depth, max_pages, max_chunks=None, delay_seconds=1.0, max_total_tokens=None):
     """Fully synchronous version of process_scraping without asyncio"""
-    print(f"Scraping {url} with max_depth={max_depth}, max_pages={max_pages}...")
+    logger.info(f"Scraping {url} with max_depth={max_depth}, max_pages={max_pages}...")
     results = scrape_with_playwright_crawl4ai_sync(url, max_depth, max_pages)
     
-    # Combine content from all successful results
     combined_content = ""
     success = False
     for result in results:
@@ -701,20 +527,165 @@ def process_scraping_fully_sync(url, max_depth, max_pages, max_chunks=None, dela
             success = True
     
     if not success:
-        print(f"Failed to scrape {url}")
+        logger.error(f"Failed to scrape {url}")
         return 0
     
-    print("Scraped content successfully")
+    logger.info("Scraped content successfully")
     housing_info = extract_housing_info_sync(
         combined_content, 
         max_chunks=max_chunks, 
         delay_seconds=delay_seconds,
         max_total_tokens=max_total_tokens
     )
-    print(f"Extracted {len(housing_info)} listings")
+    logger.warning(f"Extracted {len(housing_info)} listings")
     
     save_to_json(housing_info, url)
     return len(housing_info)
+
+def run_gui():
+    from property_pipeline import queue_tasks
+
+    root = tk.Tk()
+    root.title("Property Scraper")
+    root.geometry("800x750")
+    root.configure(bg="#2E2E2E")
+    root.resizable(False, False)
+
+    style = ttk.Style()
+    style.theme_use("clam")
+    style.configure("TLabel", background="#2E2E2E", foreground="#FFFFFF", font=("Helvetica", 12))
+    style.configure("TButton", font=("Helvetica", 12, "bold"), padding=10, background="#4CAF50", foreground="#FFFFFF")
+    style.map("TButton", background=[("active", "#45A049")])
+    style.configure("TEntry", fieldbackground="#424242", foreground="#FFFFFF", font=("Helvetica", 11))
+    style.configure("TCheckbutton", background="#2E2E2E", foreground="#FFFFFF", font=("Helvetica", 11))
+    style.map("TCheckbutton", background=[("active", "#2E2E2E")])
+
+    ttk.Label(root, text="Property Web Scraper", font=("Helvetica", 18, "bold"), foreground="#4CAF50").pack(pady=15)
+
+    frame = ttk.Frame(root, padding="20")
+    frame.pack(fill="both", expand=True)
+
+    ttk.Label(frame, text="Websites to Scrape (one per line):").grid(row=0, column=0, padx=10, pady=5, sticky="w")
+    url_text = tk.Text(frame, height=5, width=60, bg="#424242", fg="#FFFFFF", insertbackground="white")
+    url_text.grid(row=1, column=0, columnspan=2, padx=10, pady=5)
+    url_text.insert("1.0", "https://www.casasyterrenos.com/jalisco/Puerto%20Vallarta/casas/venta?desde=0&hasta=5000000")
+
+    crawler_frame = ttk.LabelFrame(frame, text="Crawler Settings", padding=10)
+    crawler_frame.grid(row=2, column=0, columnspan=2, padx=10, pady=10, sticky="we")
+    
+    ttk.Label(crawler_frame, text="Max Depth:").grid(row=0, column=0, padx=10, pady=5, sticky="e")
+    depth_entry = ttk.Entry(crawler_frame, width=10)
+    depth_entry.grid(row=0, column=1, padx=10, pady=5, sticky="w")
+    depth_entry.insert(0, "2")
+
+    ttk.Label(crawler_frame, text="Max Pages:").grid(row=0, column=2, padx=10, pady=5, sticky="e")
+    pages_entry = ttk.Entry(crawler_frame, width=10)
+    pages_entry.grid(row=0, column=3, padx=10, pady=5, sticky="w")
+    pages_entry.insert(0, "5")
+    
+    api_frame = ttk.LabelFrame(frame, text="API Rate Limiting", padding=10)
+    api_frame.grid(row=3, column=0, columnspan=2, padx=10, pady=10, sticky="we")
+    
+    ttk.Label(api_frame, text="Max Chunks:").grid(row=0, column=0, padx=10, pady=5, sticky="e")
+    chunks_entry = ttk.Entry(api_frame, width=10)
+    chunks_entry.grid(row=0, column=1, padx=10, pady=5, sticky="w")
+    chunks_entry.insert(0, "3")
+    
+    ttk.Label(api_frame, text="Max Total Tokens:").grid(row=0, column=2, padx=10, pady=5, sticky="e")
+    tokens_entry = ttk.Entry(api_frame, width=10)
+    tokens_entry.grid(row=0, column=3, padx=10, pady=5, sticky="w")
+    tokens_entry.insert(0, "10000")
+    
+    ttk.Label(api_frame, text="Scraper Delay (seconds):").grid(row=1, column=0, padx=10, pady=5, sticky="e")
+    delay_entry = ttk.Entry(api_frame, width=10)
+    delay_entry.grid(row=1, column=1, padx=10, pady=5, sticky="w")
+    delay_entry.insert(0, "2.0")
+    
+    ttk.Label(api_frame, text="Cleaner Delay (seconds):").grid(row=1, column=2, padx=10, pady=5, sticky="e")
+    cleaner_delay_entry = ttk.Entry(api_frame, width=10)
+    cleaner_delay_entry.grid(row=1, column=3, padx=10, pady=5, sticky="w")
+    cleaner_delay_entry.insert(0, "1.0")
+    
+    warning_frame = ttk.LabelFrame(frame, text="API Usage Warning", padding=10)
+    warning_frame.grid(row=4, column=0, columnspan=2, padx=10, pady=10, sticky="we")
+    
+    warning_text = (
+        "Note: Each chunk consumes approximately 500-1000 tokens.\n"
+        "Smaller chunks and longer delays help avoid API rate limits.\n"
+        "Recommended: max 3-5 chunks, 2+ second delays between requests."
+    )
+    warning_label = ttk.Label(warning_frame, text=warning_text, foreground="#FFA500")
+    warning_label.grid(row=0, column=0, padx=10, pady=5, sticky="w")
+    
+    advanced_frame = ttk.LabelFrame(frame, text="Advanced Options", padding=10)
+    advanced_frame.grid(row=5, column=0, columnspan=2, padx=10, pady=10, sticky="we")
+    
+    use_sync_var = tk.BooleanVar(value=True)
+    sync_checkbox = ttk.Checkbutton(
+        advanced_frame, 
+        text="Use fully synchronous mode (no asyncio)", 
+        variable=use_sync_var
+    )
+    sync_checkbox.grid(row=0, column=0, padx=10, pady=5, sticky="w")
+
+    status_label = ttk.Label(frame, text="Ready to scrape", foreground="#FFFFFF", font=("Helvetica", 11, "italic"))
+    status_label.grid(row=6, column=0, columnspan=2, pady=10)
+
+    submit_button = ttk.Button(frame, text="Start Scraping", command=lambda: on_submit())
+    submit_button.grid(row=7, column=0, columnspan=2, pady=20)
+
+    def on_submit():
+        urls = [url.strip() for url in url_text.get("1.0", tk.END).splitlines() if url.strip()]
+        try:
+            max_depth = int(depth_entry.get().strip())
+            max_pages = int(pages_entry.get().strip())
+            max_chunks_val = int(chunks_entry.get().strip())
+            max_tokens = int(tokens_entry.get().strip())
+            delay_seconds = float(delay_entry.get().strip())
+            cleaner_delay = float(cleaner_delay_entry.get().strip())
+            use_sync = use_sync_var.get()
+            
+            if not urls or max_depth < 0 or max_pages < 1 or delay_seconds < 0 or cleaner_delay < 0:
+                raise ValueError
+            
+            if max_chunks_val < 1:
+                messagebox.showwarning("Warning", "Setting max chunks to at least 1 to ensure some results are processed.")
+                max_chunks_val = 1
+                
+            if max_tokens < 1000:
+                messagebox.showwarning("Warning", "Setting max tokens to at least 1000 to ensure one chunk can be processed.")
+                max_tokens = 1000
+                
+        except ValueError:
+            messagebox.showerror("Input Error", "Enter valid URLs, non-negative depth and delays, and pages >= 1.")
+            return
+        
+        if use_sync:
+            os.environ["USE_SYNC"] = "true"
+            status_label.config(text=f"Running in synchronous mode. Queuing {len(urls)} websites...", foreground="#FFA500")
+        else:
+            os.environ["USE_SYNC"] = "false"
+            status_label.config(text=f"Queuing {len(urls)} websites...", foreground="#FFA500")
+            
+        submit_button.config(state="disabled")
+        
+        def queue_and_update():
+            queue_tasks(
+                urls, 
+                max_depth, 
+                max_pages, 
+                max_chunks_val, 
+                delay_seconds, 
+                cleaner_delay,
+                max_tokens
+            )
+            root.after(0, lambda: status_label.config(text=f"Queued {len(urls)} websites!", foreground="green"))
+            root.after(0, lambda: submit_button.config(state="normal"))
+
+        thread = threading.Thread(target=queue_and_update)
+        thread.start()
+
+    root.mainloop()
 
 if __name__ == "__main__":
     run_gui()
